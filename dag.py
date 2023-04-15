@@ -352,7 +352,7 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_tracks_df = ti.xcom_pull(task_ids="extract_track_data")
+        json_tracks_df = ti.xcom_pull(task_ids="extract_track_data", key="track_dataframe")
         tracks_df = json.loads(json_tracks_df)
         tracks_df_fix = pd.json_normalize(tracks_df, record_path=["data"])
         tracks_df_fix.columns = [
@@ -383,7 +383,7 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_artists_df = ti.xcom_pull(task_ids="extract_artist_data")
+        json_artists_df = ti.xcom_pull(task_ids="extract_artist_data", key="artist_dataframe")
         artists_df = json.loads(json_artists_df)
         artists_df_fix = pd.json_normalize(artists_df, record_path=["data"])
         artists_df_fix.columns = ["artist_id", "artist_name", "genre", "popularity"]
@@ -408,7 +408,7 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_audios_df = ti.xcom_pull(task_ids="extract_audio_data")
+        json_audios_df = ti.xcom_pull(task_ids="extract_audio_data", key="audio_dataframe")
         audios_df = json.loads(json_audios_df)
         audios_df_fix = pd.json_normalize(audios_df, record_path=["data"])
         audios_df_fix.columns = [
@@ -454,7 +454,7 @@ with DAG(
 
         # Pull Albums Data from previous task
         ti = kwargs["ti"]
-        json_albums_df = ti.xcom_pull(task_ids="extract_album_data")
+        json_albums_df = ti.xcom_pull(task_ids="extract_album_data", key="album_dataframe")
         albums_df = json.loads(json_albums_df)
         albums_df_fix = pd.json_normalize(albums_df, record_path=["data"])
         albums_df_fix.columns = [
