@@ -76,3 +76,12 @@ def find_recommendation(df, track_names):
     choice = df[df["input"] == True].reset_index()
     songs = cluster(track_names, choice, df)
     return songs
+
+
+def format_recommendation(lst):
+    string = f"{1}. {lst[0]}" if lst else ""
+    count = 2
+    for song in lst:
+        string += f"\n{count}. {song}"
+        count += 1
+    return string

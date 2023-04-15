@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import joblib
 from google.cloud import bigquery
-from recommendation import find_recommendation
+from recommendation import find_recommendation, format_recommendation
 
 
 # Code for the Dashboard page
@@ -58,8 +58,8 @@ def model_prediction(item):
     X = data.drop("popularity", axis=1)
     output = model.predict(X)
     # predict recommendation
-    songs = find_recommendation(tracks_data, item)
-    return output, songs
+    songs = format_recommendation(find_recommendation(tracks_data, item))
+    return output[0], songs
 
 
 # Dropdown options for the Model page
@@ -75,7 +75,7 @@ with gr.Blocks(
     <div style='position: absolute;top: 0;left: 0;width: 100%;height: 100%; z-index=1'></div>\
     <div style='position: absolute;top: 0;left: 0;width: 100%;height: 100%;background-color: rgba(255, 255, 255, 0.5); z-index: 1'></div>\
     <div style='position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;z-index: 2'>\
-      <p style='font-size: 38px; font-weight: bold; color: #ffffff'>Predict Condo Prices ft. Review Analytics</p>\
+      <p style='font-size: 38px; font-weight: bold; color: #ffffff'>Spotify Analysis</p>\
     </div>"
     )
 
@@ -92,7 +92,7 @@ with gr.Blocks(
             get_prediction = gr.Button("Predict", variant="primary")
         with gr.Column():
             popularity = gr.Textbox(label="Popularity")
-            recommendation = gr.Textbox(label="Recommendation")
+            recommendation = gr.Textbox(label="Recommended Songs")
             get_prediction.click(
                 fn=model_prediction,
                 inputs=[dropdown],
