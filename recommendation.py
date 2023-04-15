@@ -8,16 +8,9 @@ from sklearn.preprocessing import StandardScaler
 le = LabelEncoder()
 scaler = StandardScaler()
 
-track = joblib.load("track_df.pkl")  # to be replaced from bigquery
-audio = joblib.load("audio_df.pkl")  # to be replaced from bigquery
 
-
-def preprocess(track, audio):
-    track = track.rename(columns={"track_id": "id"})
-    track["id"] = track["id"].astype(str)
-    audio["id"] = audio["id"].astype(str)
-    merged_df = pd.merge(track, audio, on="id", how="left")
-    merged_df = merged_df.dropna().drop_duplicates(subset=["track_name"])
+def preprocess(df):
+    merged_df = df.dropna().drop_duplicates(subset=["track_name"])
     merged_df = merged_df[
         [
             "id",
@@ -77,8 +70,8 @@ def cluster(name, input_df, df):
     return similar_songs
 
 
-def find_recommendation(track_names):
-    df = preprocess(track, audio)
+def find_recommendation(df, track_names):
+    df = preprocess(df)
     df["input"] = df["track_name"].apply(lambda x: x in track_names)
     choice = df[df["input"] == True].reset_index()
     songs = cluster(track_names, choice, df)
