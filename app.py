@@ -58,7 +58,7 @@ def model_prediction(item):
     X = data.drop("popularity", axis=1)
     output = model.predict(X)
     # predict recommendation
-    songs = find_recommendation(item)
+    songs = find_recommendation(tracks_data, item)
     return output, songs
 
 
