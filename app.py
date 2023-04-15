@@ -1,6 +1,8 @@
 import gradio as gr
 import numpy as np
 import matplotlib.pyplot as plt
+import joblib
+from google.cloud import bigquery
 
 
 # Code for the Dashboard page
@@ -15,15 +17,32 @@ def dashboard():
     plt.tight_layout()
     return fig
 
+client = bigquery.Client.from_service_account_json("is3107-381408-7e3720e3fc1b.json")
+
+# Load the pre-trained model
+model = joblib.load("prediction_model.joblib")
+
+QUERY = ('SELECT * FROM Spotify.Audio_Features JOIN Spotify.Tracks ON Audio_Features.id = Tracks.track_id')
+
+def get_tracks(QUERY):
+    query_job = client.query(QUERY)  
+    query_result = query_job.result()  
+    data = query_result.to_dataframe()
+    return data
+    
+tracks_data = get_tracks(QUERY)
 
 # Code for the Model page
 def model_prediction(item):
+    data = tracks_data[tracks_data['track_name'] == item]
+    data = data.drop(['artist_id', 'type', 'id', 'uri', 'track_href', 'analysis_url', 'track_id', 'track_name', 'album_id'], axis=1)
+    X = data.drop('popularity', axis=1)
+    output = model.predict(X)
     # Replace this with your actual model prediction code
-    return 80, f"The model predicts that {item} is a good choice!"
-
+    return output, f"The model predicts that {item} is a good choice!"
 
 # Dropdown options for the Model page
-dropdown_options = ["Item 1", "Item 2", "Item 3"]
+dropdown_options = list(tracks_data['track_name'])
 
 with gr.Blocks(
     css=".gradio-container {width: 100%} .tab-label {font-weight: bold, font-size: 16px}"
