@@ -5,21 +5,68 @@ import joblib
 from google.cloud import bigquery
 from recommendation import find_recommendation, format_recommendation
 
+client = bigquery.Client.from_service_account_json("is3107-381408-7e3720e3fc1b.json")
 
 # Code for the Dashboard page
-def dashboard():
-    x = np.linspace(-10, 10, 100)
-    y = np.sin(x)
-    fig, ax = plt.subplots()
-    ax.plot(x, y)
-    plt.title("Sinusoidal Curve")
-    plt.xlabel("X-axis")
-    plt.ylabel("Y-axis")
-    plt.tight_layout()
+def get_artist_df():
+    query_artist = "SELECT * FROM Spotify.Artists"
+    query_job = client.query(query_artist)
+    query_result = query_job.result()
+    data = query_result.to_dataframe()
+    return data
+
+def get_tracks_df():
+    query_track = "SELECT * FROM Spotify.Tracks"
+    query_job = client.query(query_track)
+    query_result = query_job.result()
+    data = query_result.to_dataframe()
+    return data
+
+def get_albums_df():
+    query_album = "SELECT * FROM Spotify.Albums"
+    query_job = client.query(query_album)
+    query_result = query_job.result()
+    data = query_result.to_dataframe()
+    return data
+
+def dashboard(insightType):
+
+    fig = plt.figure(figsize=(10, 5))
+
+    if (insightType == 'Tracks Popularity'):
+      df_spotify = get_tracks_df()
+      df2 = df_spotify.sort_values(by=["popularity"], ascending=False)
+      df2 = df2.dropna().drop_duplicates(subset=["track_name"])
+      plt.barh(df2["track_name"][:20], df2["popularity"][:20], color='maroon')
+      plt.xlabel("Popularity")
+      plt.ylabel("Track Name")
+      plt.title("Top 20 Popular Songs") 
+      plt.gca().invert_yaxis()
+      plt.show()
+
+    elif (insightType == 'Artists Popularity'):
+      df_spotify = get_artist_df()
+      df_stream = df_spotify.sort_values(by=["popularity"], ascending=False)
+      df_stream = df_stream.dropna().drop_duplicates(subset=["artist_name"])
+      plt.barh(df_stream["artist_name"][:20], df_stream["popularity"][:20], color='maroon')
+      plt.xlabel("Popularity")
+      plt.ylabel("Artist Name")
+      plt.title("Top 20 Popular Artist")
+      plt.gca().invert_yaxis()
+      plt.show()
+    
+    '''
+    elif (insightType == 'Album Popularity'):
+      df_weeksOnChart = df_spotify.sort_values(by=["weeks_on_chart"], ascending=False)
+      plt.barh(df_weeksOnChart["track_name"][:20], df_weeksOnChart["weeks_on_chart"][:20], color='maroon')
+      plt.xlabel("Length of Weeks on Chart")
+      plt.ylabel("Track Name")
+      plt.title("Top 50 Reigning Songs")
+      plt.gca().invert_yaxis()
+      plt.show()
+    '''
+    
     return fig
-
-
-client = bigquery.Client.from_service_account_json("is3107-381408-7e3720e3fc1b.json")
 
 # Load the pre-trained model
 model = joblib.load("prediction_model.joblib")
@@ -81,10 +128,10 @@ with gr.Blocks(
 
     with gr.Tab("Dashboard", elem_classes="tab-label"):
         with gr.Column():
-            dropdown = gr.Dropdown(dropdown_options, label="Songs")
+            insightType = gr.Dropdown(['Tracks Popularity', 'Artists Popularity'], label="Choice")
             get_dashboard = gr.Button("Generate Dashboard", variant="primary")
-            plot = gr.Plot(dashboard())
-            get_dashboard.click(fn=lambda: plot.update(dashboard()))
+            output = gr.Plot()
+            get_dashboard.click(fn=dashboard, inputs=insightType, outputs=output)
 
     with gr.Tab("ML", elem_classes="tab-label"):
         with gr.Column():
