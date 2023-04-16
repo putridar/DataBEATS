@@ -1,4 +1,4 @@
-import spotipy #asdasdasd
+import spotipy  # asdasdasd
 from spotipy.oauth2 import SpotifyClientCredentials
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -21,6 +21,17 @@ import requests
 import warnings
 import json
 from config import SERVICE_ACCOUNT, CIDS, SECRETS
+import datetime
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+
+# Initialize Firebase Admin SDK with your credentials
+cred = credentials.Certificate("databeats-firebase.json")
+firebase_admin.initialize_app(cred)
+
+# Initialize Firestore client
+db = firestore.client()
 
 # Filter out all warnings
 warnings.filterwarnings("ignore")
@@ -66,6 +77,16 @@ default_args = {
 
 
 # helper
+def get_time():
+    # get today's date in UTC timezone
+    today = datetime.datetime.now().date()
+    # get the start of the week (Monday)
+    start_of_week = today - datetime.timedelta(days=today.weekday())
+    # convert to Unix timestamp
+    start_of_week_unix = int(start_of_week.strftime("%s"))
+    return start_of_week_unix
+
+
 def enrich_artist_from_other_df(artist_df, other_df):
     headers = get_headers(cids[1], secrets[1])
     artist_name = []
@@ -126,7 +147,9 @@ with DAG(
         track_id = []
         years = ["2023"]
         artist_id = []
+        timestamps = []
         headers = get_headers(cids[0], secrets[0])
+        time = get_time()
         # Operations
         for year in years:
             query = f"year:{year}"
@@ -143,6 +166,7 @@ with DAG(
                     track_name.append(t["name"])
                     track_id.append(t["id"])
                     popularity.append(t["popularity"])
+                    timestamps.append(time)
 
         track_dataframe = pd.DataFrame(
             {
@@ -151,6 +175,7 @@ with DAG(
                 "track_name": track_name,
                 "popularity": popularity,
                 "album_id": album_id,
+                "timestamp": timestamps,
             }
         )
         # Push to XCom for second task
@@ -167,7 +192,9 @@ with DAG(
         popularity = []
         genre = []
         years = ["2023"]
-        headers = get_headers(cids[0], secrets[0])
+        timestamps = []
+        headers = get_headers(cids[4], secrets[4])
+        time = get_time()
         # Operations
         for year in years:
             query = f"year:{year}"
@@ -188,6 +215,7 @@ with DAG(
                     artist_id.append(t["id"])
                     popularity.append(t["popularity"])
                     genre.append(t["genres"])
+                    timestamps.append(time)
 
         artist_df = pd.DataFrame(
             {
@@ -195,6 +223,7 @@ with DAG(
                 "artist_name": artist_name,
                 "genre": genre,
                 "popularity": popularity,
+                "timestamp": timestamps,
             }
         )
 
@@ -214,7 +243,9 @@ with DAG(
         genre = []
         popularity = []
         album_id = []
+        timestamps = []
         headers = get_headers(cids[1], secrets[1])
+        time = get_time()
         years = ["2023"]
         # Operations
         for year in years:
@@ -250,6 +281,7 @@ with DAG(
                 print(e)
 
             popularity.append(pop)
+            timestamps.append(time)
 
         # Create Dataframe
         album_dataframe = pd.DataFrame(
@@ -260,6 +292,7 @@ with DAG(
                 "total_tracks": total_tracks,
                 "release_date": release_date,
                 "popularity": popularity,
+                "timestamp": timestamps,
             }
         )
         print("album: ", album_dataframe.shape)
@@ -306,6 +339,42 @@ with DAG(
         df_json = audio_dataframe.to_json(orient="split")
         ti.xcom_push(key="audio_dataframe", value=df_json)
 
+    def extract_db(name):
+        ref = db.collection(name)
+        data = []
+        for doc in ref.stream():
+            doc_data = doc.to_dict()
+            data.append(doc_data)
+        return data
+
+    def extract_artist_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("artists")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="artist_db", value=df_json)
+
+    def extract_album_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("albums")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="album_db", value=df_json)
+
+    def extract_track_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("tracks")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="track_db", value=df_json)
+
+    def extract_audio_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("audio")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="audio_db", value=df_json)
+
     def transform_data(**kwargs):
         ti = kwargs["ti"]
         track_dataframe_json = ti.xcom_pull(
@@ -328,7 +397,6 @@ with DAG(
         )
         audio_df = pd.read_json(audio_dataframe_json, orient="split")
 
-        artist_df = artist_df.drop_duplicates(subset=["artist_id"]).reset_index()
         artist_df = artist_df[artist_df["popularity"] != 0]
         album_df = album_df[album_df["popularity"] != 0].reset_index()
         track_df = track_df[track_df["popularity"] != 0].reset_index()
@@ -346,13 +414,104 @@ with DAG(
         df_json = audio_df.to_json(orient="split")
         ti.xcom_push(key="audio_dataframe", value=df_json)
 
+    def load_track_db(**kwargs):
+        ti = kwargs["ti"]
+        track_dataframe_json = ti.xcom_pull(
+            task_ids="transform_data", key="track_dataframe"
+        )
+        track = pd.read_json(track_dataframe_json, orient="split")
+
+        for row in range(track.shape[0]):
+            curr = track.iloc[track.shape[0] - 1 - row]
+            id = curr["track_id"]
+            time = get_time()
+            art_id = curr["artist_id"]
+            alb_id = curr["album_id"]
+            name = curr["track_name"]
+            pop = curr["popularity"]
+            data = {
+                "track_id": id,
+                "album_id": alb_id,
+                "artist_id": art_id,
+                "track_name": name,
+                "popularity": int(pop),
+                "timestamp": time,
+            }
+            db.collection("tracks").document(id + "_" + str(time)).set(data)
+
+    def load_album_db(**kwargs):
+        ti = kwargs["ti"]
+        album_dataframe_json = ti.xcom_pull(
+            task_ids="transform_data", key="album_dataframe"
+        )
+        album = pd.read_json(album_dataframe_json, orient="split")
+        for row in range(album.shape[0]):
+            curr = album.iloc[album.shape[0] - 1 - row]
+            id = curr["id"]
+            time = get_time()
+            art_id = curr["artist_id"]
+            name = curr["album_name"]
+            t = curr["total_tracks"]
+            d = curr["release_date"]
+            pop = curr["popularity"]
+            data = {
+                "album_id": id,
+                "artist_id": art_id,
+                "album_name": name,
+                "total_tracks": int(t),
+                "release_date": d,
+                "popularity": int(pop),
+                "timestamp": time,
+            }
+            db.collection("albums").document(id + "_" + str(time)).set(data)
+
+    def load_artist_db(**kwargs):
+        ti = kwargs["ti"]
+        artist_dataframe_json = ti.xcom_pull(
+            task_ids="transform_data", key="artist_dataframe"
+        )
+        artist = pd.read_json(artist_dataframe_json, orient="split")
+        for row in range(artist.shape[0]):
+            curr = artist.iloc[artist.shape[0] - 1 - row]
+            id = curr["artist_id"]
+            time = get_time()
+            name = curr["artist_name"]
+            genre = curr["genre"]
+            pop = curr["popularity"]
+            data = {
+                "artist_id": id,
+                "artist_name": name,
+                "genre": genre,
+                "popularity": int(pop),
+                "timestamp": time,
+            }
+            db.collection("artists").document(id + "_" + str(time)).set(data)
+
+    def load_audio_db(**kwargs):
+        ti = kwargs["ti"]
+        audio_dataframe_json = ti.xcom_pull(
+            task_ids="transform_data", key="audio_dataframe"
+        )
+        audio = pd.read_json(audio_dataframe_json, orient="split")
+        for row in range(audio.shape[0]):
+            curr = audio.iloc[row]
+            data = {}
+            id = curr["id"]
+            data = curr.to_dict()
+            data["track_id"] = id
+            del data["id"]
+            del data["type"]
+            db.collection("audio").document(id).set(data)
+
     def load_tracks_data(**kwargs):
         # Connect to BigQuery
         client = bigquery.Client()
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_tracks_df = ti.xcom_pull(task_ids="extract_track_data", key="track_dataframe")
+        json_tracks_df = ti.xcom_pull(
+            task_ids="extract_track_data", key="track_dataframe"
+        )
         tracks_df = json.loads(json_tracks_df)
         tracks_df_fix = pd.json_normalize(tracks_df, record_path=["data"])
         tracks_df_fix.columns = [
@@ -383,7 +542,9 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_artists_df = ti.xcom_pull(task_ids="extract_artist_data", key="artist_dataframe")
+        json_artists_df = ti.xcom_pull(
+            task_ids="extract_artist_data", key="artist_dataframe"
+        )
         artists_df = json.loads(json_artists_df)
         artists_df_fix = pd.json_normalize(artists_df, record_path=["data"])
         artists_df_fix.columns = ["artist_id", "artist_name", "genre", "popularity"]
@@ -408,7 +569,9 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_audios_df = ti.xcom_pull(task_ids="extract_audio_data", key="audio_dataframe")
+        json_audios_df = ti.xcom_pull(
+            task_ids="extract_audio_data", key="audio_dataframe"
+        )
         audios_df = json.loads(json_audios_df)
         audios_df_fix = pd.json_normalize(audios_df, record_path=["data"])
         audios_df_fix.columns = [
@@ -454,7 +617,9 @@ with DAG(
 
         # Pull Albums Data from previous task
         ti = kwargs["ti"]
-        json_albums_df = ti.xcom_pull(task_ids="extract_album_data", key="album_dataframe")
+        json_albums_df = ti.xcom_pull(
+            task_ids="extract_album_data", key="album_dataframe"
+        )
         albums_df = json.loads(json_albums_df)
         albums_df_fix = pd.json_normalize(albums_df, record_path=["data"])
         albums_df_fix.columns = [
@@ -510,9 +675,53 @@ with DAG(
         python_callable=extract_audio_data,
     )
 
+    extract_artist_db_task = PythonOperator(
+        task_id="extract_artist_db",
+        python_callable=extract_artist_db,
+    )
+
+    extract_album_db_task = PythonOperator(
+        task_id="extract_album_db",
+        python_callable=extract_album_db,
+    )
+
+    extract_track_db_task = PythonOperator(
+        task_id="extract_track_db",
+        python_callable=extract_track_db,
+    )
+
+    extract_audio_db_task = PythonOperator(
+        task_id="extract_audio_db",
+        python_callable=extract_audio_db,
+    )
+
     transform_task = PythonOperator(
         task_id="transform_data",
         python_callable=transform_data,
+    )
+
+    load_track_db_task = PythonOperator(
+        task_id="load_track_db",
+        python_callable=load_track_db,
+        dag=dag,
+    )
+
+    load_artist_db_task = PythonOperator(
+        task_id="load_artist_db",
+        python_callable=load_artist_db,
+        dag=dag,
+    )
+
+    load_album_db_task = PythonOperator(
+        task_id="load_album_db",
+        python_callable=load_album_db,
+        dag=dag,
+    )
+
+    load_audio_db_task = PythonOperator(
+        task_id="load_audio_db",
+        python_callable=load_audio_db,
+        dag=dag,
     )
 
     load_tracks_task = PythonOperator(
@@ -572,11 +781,23 @@ with DAG(
     )
 
     (
-        extract_track_task
-        >> extract_artist_task
-        >> extract_album_task
+        (
+            extract_track_task,
+            extract_artist_task,
+            extract_album_task,
+            extract_artist_db_task,
+            extract_album_db_task,
+            extract_track_db_task,
+            extract_audio_db_task,
+        )
         >> extract_audio_task
         >> transform_task
+        >> (
+            load_track_db_task,
+            load_artist_db_task,
+            load_album_db_task,
+            load_audio_db_task,
+        )
         >> load_tracks_task
         >> load_artists_task
         >> load_albums_task
