@@ -1,5 +1,3 @@
-import spotipy  # asdasdasd
-from spotipy.oauth2 import SpotifyClientCredentials
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.google.cloud.operators.bigquery import (
@@ -124,6 +122,36 @@ def enrich_artist_from_other_df(artist_df, other_df):
     )
     artist_df = artist_df.append(artist_dataframe)
     return artist_df
+
+
+def get_week_on_chart(df):
+    df["timestamp"] = df["timestamp"].apply(
+        lambda x: datetime.datetime.fromtimestamp(x)
+    )
+    df = df.sort_values(["track_id", "timestamp"])
+    grouped = df.groupby("track_id")
+    new_df = {}
+    newest_timestamp = max(df["timestamp"])
+
+    for name, group in grouped:
+        prev_timestamp = group.iloc[0]["timestamp"]
+        new_df[name] = group.drop(["timestamp"], axis=1).iloc[-1].to_dict()
+        new_df[name]["chart"] = 0
+        # Reduce
+        for index, row in group.iterrows():
+            diff = (row["timestamp"] - prev_timestamp).days
+            if diff <= 7 and row["popularity"] >= 70:
+                new_df[name]["chart"] += 1
+            else:
+                new_df[name]["chart"] = 0
+            prev_timestamp = row["timestamp"]
+        diff = (newest_timestamp - prev_timestamp).days
+        if diff < 7:
+            new_df[name]["chart"] = new_df[name]["chart"]
+        else:
+            new_df[name]["chart"] = 0
+
+    return pd.DataFrame(new_df).T.reset_index().drop(["index"], axis=1)
 
 
 with DAG(
@@ -286,7 +314,7 @@ with DAG(
         # Create Dataframe
         album_dataframe = pd.DataFrame(
             {
-                "id": album_id,
+                "album_id": album_id,
                 "artist_id": artist_id,
                 "album_name": album_name,
                 "total_tracks": total_tracks,
@@ -333,6 +361,16 @@ with DAG(
         audio_features_values = [list(x.values()) for x in track_dataframe if x != None]
         audio_dataframe = pd.DataFrame(
             audio_features_values, columns=audio_features_columns
+        )
+        audio_dataframe = (
+            audio_dataframe.drop(["type"], axis=1)
+            if "type" in audio_dataframe.columns
+            else audio_dataframe
+        )
+        audio_dataframe = (
+            audio_dataframe.drop(["error"], axis=1)
+            if "error" in audio_dataframe.columns
+            else audio_dataframe
         )
         print("audio: ", audio_dataframe.shape)
 
@@ -397,28 +435,62 @@ with DAG(
         )
         audio_df = pd.read_json(audio_dataframe_json, orient="split")
 
+        track_db_json = ti.xcom_pull(task_ids="extract_track_db", key="track_db")
+        track = pd.read_json(track_db_json, orient="split")
+
+        album_db_json = ti.xcom_pull(task_ids="extract_album_db", key="album_db")
+        album = pd.read_json(album_db_json, orient="split")
+
+        artist_db_json = ti.xcom_pull(task_ids="extract_artist_db", key="artist_db")
+        artist = pd.read_json(artist_db_json, orient="split")
+
+        audio_db_json = ti.xcom_pull(task_ids="extract_audio_db", key="audio_db")
+        audio = pd.read_json(audio_db_json, orient="split")
+
         artist_df = artist_df[artist_df["popularity"] != 0]
         album_df = album_df[album_df["popularity"] != 0].reset_index()
         track_df = track_df[track_df["popularity"] != 0].reset_index()
 
+        artist = artist.append(artist_df)
+        album = album.append(album_df)
+        track = track.append(track_df)
+        audio = audio.append(audio_df)
+
+        audio = audio.rename(columns={"id": "track_id"})
+        merged_df = pd.merge(track, audio, on="track_id", how="left").drop_duplicates(
+            subset=["track_id", "timestamp"]
+        )
+        df = get_week_on_chart(merged_df)
+
+        artist_col = ["artist_id", "artist_name", "popularity"]
+        album_col = ["album_id", "artist_id", "album_name", "popularity"]
+        exclude_track_col = ["uri", "track_href"]
+        artist = artist[artist_col].drop_duplicates()
+        album = album[album_col].drop_duplicates()
+        df = df.drop(exclude_track_col, axis=1).drop_duplicates()
         print("artist: ", artist_df.shape)
         print("album: ", album_df.shape)
-        print("track: ", track_df.shape)
+        print("track: ", df.shape)
 
         df_json = artist_df.to_json(orient="split")
-        ti.xcom_push(key="artist_dataframe", value=df_json)
+        ti.xcom_push(key="artist_db", value=df_json)
         df_json = album_df.to_json(orient="split")
-        ti.xcom_push(key="album_dataframe", value=df_json)
+        ti.xcom_push(key="album_db", value=df_json)
         df_json = track_df.to_json(orient="split")
-        ti.xcom_push(key="track_dataframe", value=df_json)
+        ti.xcom_push(key="track_db", value=df_json)
         df_json = audio_df.to_json(orient="split")
-        ti.xcom_push(key="audio_dataframe", value=df_json)
+        ti.xcom_push(key="audio_db", value=df_json)
+
+        df_json = artist.to_json(orient="split")
+        ti.xcom_push(key="artist_dataframe", value=df_json)
+        df_json = album.to_json(orient="split")
+        ti.xcom_push(key="album_dataframe", value=df_json)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="track_dataframe", value=df_json)
 
     def load_track_db(**kwargs):
         ti = kwargs["ti"]
-        track_dataframe_json = ti.xcom_pull(
-            task_ids="transform_data", key="track_dataframe"
-        )
+        track_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="track_db")
         track = pd.read_json(track_dataframe_json, orient="split")
 
         for row in range(track.shape[0]):
@@ -441,13 +513,11 @@ with DAG(
 
     def load_album_db(**kwargs):
         ti = kwargs["ti"]
-        album_dataframe_json = ti.xcom_pull(
-            task_ids="transform_data", key="album_dataframe"
-        )
+        album_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="album_db")
         album = pd.read_json(album_dataframe_json, orient="split")
         for row in range(album.shape[0]):
             curr = album.iloc[album.shape[0] - 1 - row]
-            id = curr["id"]
+            id = curr["album_id"]
             time = get_time()
             art_id = curr["artist_id"]
             name = curr["album_name"]
@@ -467,9 +537,7 @@ with DAG(
 
     def load_artist_db(**kwargs):
         ti = kwargs["ti"]
-        artist_dataframe_json = ti.xcom_pull(
-            task_ids="transform_data", key="artist_dataframe"
-        )
+        artist_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="artist_db")
         artist = pd.read_json(artist_dataframe_json, orient="split")
         for row in range(artist.shape[0]):
             curr = artist.iloc[artist.shape[0] - 1 - row]
@@ -489,9 +557,7 @@ with DAG(
 
     def load_audio_db(**kwargs):
         ti = kwargs["ti"]
-        audio_dataframe_json = ti.xcom_pull(
-            task_ids="transform_data", key="audio_dataframe"
-        )
+        audio_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="audio_db")
         audio = pd.read_json(audio_dataframe_json, orient="split")
         for row in range(audio.shape[0]):
             curr = audio.iloc[row]
@@ -509,9 +575,7 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_tracks_df = ti.xcom_pull(
-            task_ids="extract_track_data", key="track_dataframe"
-        )
+        json_tracks_df = ti.xcom_pull(task_ids="transform", key="track_dataframe")
         tracks_df = json.loads(json_tracks_df)
         tracks_df_fix = pd.json_normalize(tracks_df, record_path=["data"])
         tracks_df_fix.columns = [
@@ -520,6 +584,21 @@ with DAG(
             "track_name",
             "popularity",
             "album_id",
+            "danceability",
+            "energy",
+            "key",
+            "loudness",
+            "mode",
+            "speechiness",
+            "acousticness",
+            "instrumentalness",
+            "liveness",
+            "valence",
+            "tempo",
+            "analysis_url",
+            "duration_ms",
+            "time_signature",
+            "chart",
         ]
         print(tracks_df_fix)
 
@@ -542,9 +621,7 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_artists_df = ti.xcom_pull(
-            task_ids="extract_artist_data", key="artist_dataframe"
-        )
+        json_artists_df = ti.xcom_pull(task_ids="transform", key="artist_dataframe")
         artists_df = json.loads(json_artists_df)
         artists_df_fix = pd.json_normalize(artists_df, record_path=["data"])
         artists_df_fix.columns = ["artist_id", "artist_name", "genre", "popularity"]
@@ -563,71 +640,19 @@ with DAG(
             )
         )
 
-    def load_audio_data(**kwargs):
-        # Connect to BigQuery
-        client = bigquery.Client()
-
-        # Pull Tracks Data from previous task
-        ti = kwargs["ti"]
-        json_audios_df = ti.xcom_pull(
-            task_ids="extract_audio_data", key="audio_dataframe"
-        )
-        audios_df = json.loads(json_audios_df)
-        audios_df_fix = pd.json_normalize(audios_df, record_path=["data"])
-        audios_df_fix.columns = [
-            "danceability",
-            "energy",
-            "key",
-            "loudness",
-            "mode",
-            "speechiness",
-            "acousticness",
-            "instrumentalness",
-            "liveness",
-            "valence",
-            "tempo",
-            "type",
-            "id",
-            "uri",
-            "track_href",
-            "analysis_url",
-            "duration_ms",
-            "time_signature",
-            "error",
-        ]
-        audios_df_fix = audios_df_fix.drop("error", axis=1)
-        print(audios_df_fix)
-
-        table_id = "is3107-381408.Spotify.Audio_Features"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-        job = client.load_table_from_dataframe(
-            audios_df_fix, table_id, job_config=job_config
-        )
-        job.result()
-        table = client.get_table(table_id)
-        print(
-            "Loaded {} rows and {} columns to {}".format(
-                table.num_rows, len(table.schema), table_id
-            )
-        )
-
     def load_albums_data(**kwargs):
         # Connect to BigQuery
         client = bigquery.Client()
 
         # Pull Albums Data from previous task
         ti = kwargs["ti"]
-        json_albums_df = ti.xcom_pull(
-            task_ids="extract_album_data", key="album_dataframe"
-        )
+        json_albums_df = ti.xcom_pull(task_ids="transform", key="album_dataframe")
         albums_df = json.loads(json_albums_df)
         albums_df_fix = pd.json_normalize(albums_df, record_path=["data"])
         albums_df_fix.columns = [
-            "id",
+            "album_id",
             "artist_id",
             "album_name",
-            "total_tracks",
-            "release_date",
             "popularity",
         ]
         print(albums_df_fix)
@@ -736,12 +761,6 @@ with DAG(
         dag=dag,
     )
 
-    load_audio_task = PythonOperator(
-        task_id="load_audio_data",
-        python_callable=load_audio_data,
-        dag=dag,
-    )
-
     load_albums_task = PythonOperator(
         task_id="load_albums_data",
         python_callable=load_albums_data,
@@ -801,7 +820,6 @@ with DAG(
         >> load_tracks_task
         >> load_artists_task
         >> load_albums_task
-        >> load_audio_task
         >> remove_duplicates_tracks
         >> remove_duplicates_artists
         >> remove_duplicates_albums
