@@ -132,15 +132,24 @@ def get_week_on_chart(df):
     grouped = df.groupby("track_id")
     new_df = {}
     newest_timestamp = max(df["timestamp"])
+    top_50_timestamp = {}
+    for timestamp in list(set(df["timestamp"])):
+        top_50 = (
+            df[df["timestamp"] == timestamp]
+            .drop_duplicates(subset=["track_id"])
+            .sort_values("popularity", ascending=False)
+            .head(50)
+        )
+        top_50_songs = list(top_50["track_id"])
+        top_50_timestamp[timestamp] = top_50_songs
 
     for name, group in grouped:
         prev_timestamp = group.iloc[0]["timestamp"]
         new_df[name] = group.drop(["timestamp"], axis=1).iloc[-1].to_dict()
         new_df[name]["chart"] = 0
-        # Reduce
         for index, row in group.iterrows():
             diff = (row["timestamp"] - prev_timestamp).days
-            if diff <= 7 and row["popularity"] >= 70:
+            if diff <= 7 and name in top_50_timestamp[row["timestamp"]]:
                 new_df[name]["chart"] += 1
             else:
                 new_df[name]["chart"] = 0
