@@ -800,14 +800,6 @@ with DAG(
         use_legacy_sql=False,
     )
 
-    remove_duplicates_audio = BigQueryOperator(
-        task_id="remove_duplicates_audio",
-        sql=remove_duplicates("is3107-381408.Spotify.Audio_Features"),
-        destination_dataset_table="is3107-381408.Spotify.Audio_Features",
-        # bigquery_conn_id='bigquery_default',
-        use_legacy_sql=False,
-    )
-
     (
         (
             extract_track_task,
@@ -832,5 +824,4 @@ with DAG(
         >> remove_duplicates_tracks
         >> remove_duplicates_artists
         >> remove_duplicates_albums
-        >> remove_duplicates_audio
     )
