@@ -14,6 +14,7 @@ secret4 = ""
 cid5 = ""
 secret5 = ""
 
+ATLAS_URI = ""
 
 CIDS = [cid1, cid2, cid3, cid4, cid5]
 SECRETS = [secret1, secret2, secret3, secret4, secret5]

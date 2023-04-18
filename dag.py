@@ -14,28 +14,20 @@ from airflow.contrib.operators.gcs_to_gcs import (
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from google.cloud import bigquery
-from datetime import datetime
 import pandas as pd
 import requests
 import warnings
 import json
-from config import SERVICE_ACCOUNT, CIDS, SECRETS
+from config import SERVICE_ACCOUNT, CIDS, SECRETS, ATLAS_URI
 import datetime
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
 import pymongo
-from dotenv import dotenv_values
 
-# Use .env values
-config = dotenv_values(".env")
-
-# Initialize Firebase Admin SDK with your credentials
-cred = credentials.Certificate("databeats-firebase.json")
-firebase_admin.initialize_app(cred)
-
-# Initialize Firestore client
-db = firestore.client()
+## Initialize Firebase Admin SDK with your credentials
+# cred = credentials.Certificate("databeats-firebase.json")
+# firebase_admin.initialize_app(cred)
+#
+## Initialize Firestore client
+# db = firestore.client()
 
 # Filter out all warnings
 warnings.filterwarnings("ignore")
@@ -174,7 +166,7 @@ with DAG(
     default_args=default_args,
     description="DAG for Spotify Analysis",
     schedule_interval=None,
-    start_date=datetime(2023, 3, 1),
+    start_date=datetime.datetime(2023, 3, 1),
     catchup=False,
     tags=["example"],
 ) as dag:
@@ -363,14 +355,14 @@ with DAG(
             # features = sp.audio_features(id)
             if features["audio_features"]:
                 audio_features.extend(features["audio_features"])
-
+        audio_features = list(filter(lambda x: x, audio_features))
         # Create DataFrame
-        # audio_dataframe = pd.DataFrame(audio_features) -> leads to NoneType error
-        audio_features_columns = list(track_dataframe[0].keys())
-        audio_features_values = [list(x.values()) for x in track_dataframe if x != None]
-        audio_dataframe = pd.DataFrame(
-            audio_features_values, columns=audio_features_columns
-        )
+        audio_dataframe = pd.DataFrame(audio_features)
+        #        audio_features_columns = list(track_dataframe[0].keys())
+        #        audio_features_values = [list(x.values()) for x in track_dataframe if x != None]
+        #        audio_dataframe = pd.DataFrame(
+        #            audio_features_values, columns=audio_features_columns
+        #        )
         audio_dataframe = (
             audio_dataframe.drop(["type"], axis=1)
             if "type" in audio_dataframe.columns
@@ -395,19 +387,21 @@ with DAG(
     #     return data
 
     def extract_db(name):
-        # api_key = 'aJ43WqZCUbRbYjH3VMIIjkM9rLelQLRH2L0HRmJWKlVL8OUlaf0FUhNMmek1Z2ab'
-        myclient = pymongo.MongoClient(config["ATLAS_URI"])
+        myclient = pymongo.MongoClient(ATLAS_URI)
         mydb = myclient["DataBeats"]
         mycol = mydb[name]
         data = []
         for doc in mycol.find():
+            del doc["_id"]
             data.append(doc)
         return data
 
     def extract_artist_db(**kwargs):
         ti = kwargs["ti"]
         data = extract_db("Artists")
+        print(data[0])
         df = pd.DataFrame(data)
+        print(df)
         df_json = df.to_json(orient="split")
         ti.xcom_push(key="artist_db", value=df_json)
 
@@ -470,12 +464,18 @@ with DAG(
         album_df = album_df[album_df["popularity"] != 0].reset_index()
         track_df = track_df[track_df["popularity"] != 0].reset_index()
 
+        audio_df = audio_df.rename(columns={"id": "track_id"})
+
+        artist_df = artist_df[list(artist.columns)]
+        album_df = album_df[list(album.columns)]
+        track_df = track_df[list(track.columns)]
+        audio_df = audio_df[list(audio.columns)]
+
         artist = artist.append(artist_df)
         album = album.append(album_df)
         track = track.append(track_df)
         audio = audio.append(audio_df)
 
-        audio = audio.rename(columns={"id": "track_id"})
         merged_df = pd.merge(track, audio, on="track_id", how="left").drop_duplicates(
             subset=["track_id", "timestamp"]
         )
@@ -534,7 +534,7 @@ with DAG(
     # MongoDB
     def uploadTracksToMongo(**kwargs):
         ti = kwargs["ti"]
-        myclient = pymongo.MongoClient(config["ATLAS_URI"])
+        myclient = pymongo.MongoClient(ATLAS_URI)
         mydb = myclient["DataBeats"]
         collection = mydb["Tracks"]
 
@@ -587,7 +587,7 @@ with DAG(
     # MongoDB
     def uploadAlbumToMongo(**kwargs):
         ti = kwargs["ti"]
-        myclient = pymongo.MongoClient(config["ATLAS_URI"])
+        myclient = pymongo.MongoClient(ATLAS_URI)
         mydb = myclient["DataBeats"]
         collection = mydb["Albums"]
 
@@ -638,7 +638,7 @@ with DAG(
     # MongoDB
     def uploadArtistToMongo(**kwargs):
         ti = kwargs["ti"]
-        myclient = pymongo.MongoClient(config["ATLAS_URI"])
+        myclient = pymongo.MongoClient(ATLAS_URI)
         mydb = myclient["DataBeats"]
         collection = mydb["Artists"]
 
@@ -678,7 +678,7 @@ with DAG(
     # MongoDB
     def uploadAudioToMongo(**kwargs):
         ti = kwargs["ti"]
-        myclient = pymongo.MongoClient(config["ATLAS_URI"])
+        myclient = pymongo.MongoClient(ATLAS_URI)
         mydb = myclient["DataBeats"]
         collection = mydb["Audio"]
 
@@ -925,7 +925,7 @@ with DAG(
         task_id="truncate_table_tracks",
         sql=truncate_table("is3107-381408.Spotify.Tracks"),
         destination_dataset_table="is3107-381408.Spotify.Tracks",
-        # bigquery_conn_id='bigquery_default',
+        #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
 
@@ -933,7 +933,7 @@ with DAG(
         task_id="truncate_table_artists",
         sql=truncate_table("is3107-381408.Spotify.Artists"),
         destination_dataset_table="is3107-381408.Spotify.Artists",
-        # bigquery_conn_id='bigquery_default',
+        #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
 
@@ -941,15 +941,15 @@ with DAG(
         task_id="truncate_table_albums",
         sql=truncate_table("is3107-381408.Spotify.Albums"),
         destination_dataset_table="is3107-381408.Spotify.Albums",
-        # bigquery_conn_id='bigquery_default',
+        #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
 
     (
         (
             extract_track_task,
-            extract_artist_task,
             extract_album_task,
+            extract_artist_task,
             extract_artist_db_task,
             extract_album_db_task,
             extract_track_db_task,
