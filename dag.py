@@ -80,6 +80,7 @@ default_args = {
 }
 
 
+
 # helper
 def get_time():
     # get today's date in UTC timezone
@@ -395,7 +396,6 @@ with DAG(
     #     return data
 
     def extract_db(name):
-        # api_key = 'aJ43WqZCUbRbYjH3VMIIjkM9rLelQLRH2L0HRmJWKlVL8OUlaf0FUhNMmek1Z2ab'
         myclient = pymongo.MongoClient(config["ATLAS_URI"])
         mydb = myclient["DataBeats"]
         mycol = mydb[name]
@@ -403,7 +403,7 @@ with DAG(
         for doc in mycol.find():
             data.append(doc)
         return data
-
+    
     def extract_artist_db(**kwargs):
         ti = kwargs["ti"]
         data = extract_db("Artists")
@@ -540,7 +540,7 @@ with DAG(
 
         track_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="track_db")
         track = pd.read_json(track_dataframe_json, orient="split")
-
+        
         for row in range(track.shape[0]):
             curr = track.iloc[track.shape[0] - 1 - row]
             id = curr["track_id"]
@@ -641,7 +641,7 @@ with DAG(
         myclient = pymongo.MongoClient(config["ATLAS_URI"])
         mydb = myclient["DataBeats"]
         collection = mydb["Artists"]
-
+        
         artist_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="artist_db")
         artist = pd.read_json(artist_dataframe_json, orient="split")
         for row in range(artist.shape[0]):
@@ -681,7 +681,7 @@ with DAG(
         myclient = pymongo.MongoClient(config["ATLAS_URI"])
         mydb = myclient["DataBeats"]
         collection = mydb["Audio"]
-
+        
         audio_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="audio_db")
         audio = pd.read_json(audio_dataframe_json, orient="split")
         for row in range(audio.shape[0]):
@@ -804,7 +804,7 @@ with DAG(
             FROM `{target}`
             group by 1
         """
-
+    
     def truncate_table(target, **context):
         return f"""
             TRUNCATE TABLE {target}
@@ -880,25 +880,25 @@ with DAG(
     # )
 
     load_tracks_mongo_task = PythonOperator(
-        task_id="load_tracks_mongo",
+        task_id='load_tracks_mongo',
         python_callable=uploadTracksToMongo,
         dag=dag,
     )
 
     load_albums_mongo_task = PythonOperator(
-        task_id="load_albums_mongo",
+        task_id='load_albums_mongo',
         python_callable=uploadAlbumToMongo,
         dag=dag,
     )
 
     load_artists_mongo_task = PythonOperator(
-        task_id="load_artists_mongo",
+        task_id='load_artists_mongo',
         python_callable=uploadArtistToMongo,
         dag=dag,
     )
 
     load_audio_mongo_task = PythonOperator(
-        task_id="load_audio_mongo",
+        task_id='load_audio_mongo',
         python_callable=uploadAudioToMongo,
         dag=dag,
     )
