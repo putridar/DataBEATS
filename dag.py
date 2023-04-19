@@ -22,13 +22,6 @@ from config import SERVICE_ACCOUNT, CIDS, SECRETS, ATLAS_URI
 import datetime
 import pymongo
 
-## Initialize Firebase Admin SDK with your credentials
-# cred = credentials.Certificate("databeats-firebase.json")
-# firebase_admin.initialize_app(cred)
-#
-## Initialize Firestore client
-# db = firestore.client()
-
 # Filter out all warnings
 warnings.filterwarnings("ignore")
 
@@ -124,7 +117,7 @@ def enrich_artist_from_other_df(artist_df, other_df):
 
 def get_week_on_chart(df):
     df["timestamp"] = df["timestamp"].apply(
-        lambda x: datetime.datetime.fromtimestamp(x)
+        lambda x: datetime.datetime.fromtimestamp(x) if type(x) == int else x
     )
     df = df.sort_values(["track_id", "timestamp"])
     grouped = df.groupby("track_id")
@@ -358,11 +351,6 @@ with DAG(
         audio_features = list(filter(lambda x: x, audio_features))
         # Create DataFrame
         audio_dataframe = pd.DataFrame(audio_features)
-        #        audio_features_columns = list(track_dataframe[0].keys())
-        #        audio_features_values = [list(x.values()) for x in track_dataframe if x != None]
-        #        audio_dataframe = pd.DataFrame(
-        #            audio_features_values, columns=audio_features_columns
-        #        )
         audio_dataframe = (
             audio_dataframe.drop(["type"], axis=1)
             if "type" in audio_dataframe.columns
@@ -378,14 +366,6 @@ with DAG(
         df_json = audio_dataframe.to_json(orient="split")
         ti.xcom_push(key="audio_dataframe", value=df_json)
 
-    # def extract_db(name):
-    #     ref = db.collection(name)
-    #     data = []
-    #     for doc in ref.stream():
-    #         doc_data = doc.to_dict()
-    #         data.append(doc_data)
-    #     return data
-
     def extract_db(name):
         myclient = pymongo.MongoClient(ATLAS_URI)
         mydb = myclient["DataBeats"]
@@ -399,7 +379,6 @@ with DAG(
     def extract_artist_db(**kwargs):
         ti = kwargs["ti"]
         data = extract_db("Artists")
-        print(data[0])
         df = pd.DataFrame(data)
         print(df)
         df_json = df.to_json(orient="split")
@@ -465,16 +444,20 @@ with DAG(
         track_df = track_df[track_df["popularity"] != 0].reset_index()
 
         audio_df = audio_df.rename(columns={"id": "track_id"})
+        audio = audio.rename(columns={"id": "track_id"})
 
         artist_df = artist_df[list(artist.columns)]
         album_df = album_df[list(album.columns)]
         track_df = track_df[list(track.columns)]
         audio_df = audio_df[list(audio.columns)]
 
-        artist = artist.append(artist_df)
-        album = album.append(album_df)
-        track = track.append(track_df)
-        audio = audio.append(audio_df)
+        print(artist)
+        print(artist_df)
+
+        artist = pd.concat([artist, artist_df]).reset_index(drop=True)
+        album = pd.concat([album, album_df]).reset_index(drop=True)
+        track = pd.concat([track, track_df]).reset_index(drop=True)
+        audio = pd.concat([audio, audio_df]).reset_index(drop=True)
 
         merged_df = pd.merge(track, audio, on="track_id", how="left").drop_duplicates(
             subset=["track_id", "timestamp"]
@@ -484,12 +467,13 @@ with DAG(
         artist_col = ["artist_id", "artist_name", "popularity"]
         album_col = ["album_id", "artist_id", "album_name", "popularity"]
         exclude_track_col = ["uri", "track_href"]
-        artist = artist[artist_col].drop_duplicates()
-        album = album[album_col].drop_duplicates()
-        df = df.drop(exclude_track_col, axis=1).drop_duplicates()
+        artist = artist[artist_col].drop_duplicates().dropna()
+        album = album[album_col].drop_duplicates().dropna()
+        df = df.drop(exclude_track_col, axis=1).drop_duplicates().dropna()
         print("artist: ", artist_df.shape)
         print("album: ", album_df.shape)
         print("track: ", df.shape)
+        audio_df = audio_df.rename(columns={"track_id": "id"})
 
         df_json = artist_df.to_json(orient="split")
         ti.xcom_push(key="artist_db", value=df_json)
@@ -507,31 +491,6 @@ with DAG(
         df_json = df.to_json(orient="split")
         ti.xcom_push(key="track_dataframe", value=df_json)
 
-    # Firebase
-    # def load_track_db(**kwargs):
-    #     ti = kwargs["ti"]
-    #     track_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="track_db")
-    #     track = pd.read_json(track_dataframe_json, orient="split")
-
-    #     for row in range(track.shape[0]):
-    #         curr = track.iloc[track.shape[0] - 1 - row]
-    #         id = curr["track_id"]
-    #         time = get_time()
-    #         art_id = curr["artist_id"]
-    #         alb_id = curr["album_id"]
-    #         name = curr["track_name"]
-    #         pop = curr["popularity"]
-    #         data = {
-    #             "track_id": id,
-    #             "album_id": alb_id,
-    #             "artist_id": art_id,
-    #             "track_name": name,
-    #             "popularity": int(pop),
-    #             "timestamp": time,
-    #         }
-    #         db.collection("tracks").document(id + "_" + str(time)).set(data)
-
-    # MongoDB
     def uploadTracksToMongo(**kwargs):
         ti = kwargs["ti"]
         myclient = pymongo.MongoClient(ATLAS_URI)
@@ -540,7 +499,7 @@ with DAG(
 
         track_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="track_db")
         track = pd.read_json(track_dataframe_json, orient="split")
-
+        data = []
         for row in range(track.shape[0]):
             curr = track.iloc[track.shape[0] - 1 - row]
             id = curr["track_id"]
@@ -549,42 +508,19 @@ with DAG(
             alb_id = curr["album_id"]
             name = curr["track_name"]
             pop = curr["popularity"]
-            data = {
-                "track_id": id,
-                "album_id": alb_id,
-                "artist_id": art_id,
-                "track_name": name,
-                "popularity": int(pop),
-                "timestamp": time,
-            }
-            collection.insert_one(data)
+            data.append(
+                {
+                    "track_id": id,
+                    "album_id": alb_id,
+                    "artist_id": art_id,
+                    "track_name": name,
+                    "popularity": int(pop),
+                    "timestamp": time,
+                }
+            )
+        if data:
+            collection.insert_many(data)
 
-    # Firebase
-    # def load_album_db(**kwargs):
-    #     ti = kwargs["ti"]
-    #     album_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="album_db")
-    #     album = pd.read_json(album_dataframe_json, orient="split")
-    #     for row in range(album.shape[0]):
-    #         curr = album.iloc[album.shape[0] - 1 - row]
-    #         id = curr["album_id"]
-    #         time = get_time()
-    #         art_id = curr["artist_id"]
-    #         name = curr["album_name"]
-    #         t = curr["total_tracks"]
-    #         d = curr["release_date"]
-    #         pop = curr["popularity"]
-    #         data = {
-    #             "album_id": id,
-    #             "artist_id": art_id,
-    #             "album_name": name,
-    #             "total_tracks": int(t),
-    #             "release_date": d,
-    #             "popularity": int(pop),
-    #             "timestamp": time,
-    #         }
-    #         db.collection("albums").document(id + "_" + str(time)).set(data)
-
-    # MongoDB
     def uploadAlbumToMongo(**kwargs):
         ti = kwargs["ti"]
         myclient = pymongo.MongoClient(ATLAS_URI)
@@ -593,7 +529,7 @@ with DAG(
 
         album_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="album_db")
         album = pd.read_json(album_dataframe_json, orient="split")
-
+        data = []
         for row in range(album.shape[0]):
             curr = album.iloc[album.shape[0] - 1 - row]
             id = curr["album_id"]
@@ -603,39 +539,20 @@ with DAG(
             t = curr["total_tracks"]
             d = curr["release_date"]
             pop = curr["popularity"]
-            data = {
-                "album_id": id,
-                "artist_id": art_id,
-                "album_name": name,
-                "total_tracks": int(t),
-                "release_date": d,
-                "popularity": int(pop),
-                "timestamp": time,
-            }
-            collection.insert_one(data)
+            data.append(
+                {
+                    "album_id": id,
+                    "artist_id": art_id,
+                    "album_name": name,
+                    "total_tracks": int(t),
+                    "release_date": d,
+                    "popularity": int(pop),
+                    "timestamp": time,
+                }
+            )
+        if data:
+            collection.insert_many(data)
 
-    # Firebase
-    # def load_artist_db(**kwargs):
-    #     ti = kwargs["ti"]
-    #     artist_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="artist_db")
-    #     artist = pd.read_json(artist_dataframe_json, orient="split")
-    #     for row in range(artist.shape[0]):
-    #         curr = artist.iloc[artist.shape[0] - 1 - row]
-    #         id = curr["artist_id"]
-    #         time = get_time()
-    #         name = curr["artist_name"]
-    #         genre = curr["genre"]
-    #         pop = curr["popularity"]
-    #         data = {
-    #             "artist_id": id,
-    #             "artist_name": name,
-    #             "genre": genre,
-    #             "popularity": int(pop),
-    #             "timestamp": time,
-    #         }
-    #         db.collection("artists").document(id + "_" + str(time)).set(data)
-
-    # MongoDB
     def uploadArtistToMongo(**kwargs):
         ti = kwargs["ti"]
         myclient = pymongo.MongoClient(ATLAS_URI)
@@ -644,6 +561,7 @@ with DAG(
 
         artist_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="artist_db")
         artist = pd.read_json(artist_dataframe_json, orient="split")
+        data = []
         for row in range(artist.shape[0]):
             curr = artist.iloc[artist.shape[0] - 1 - row]
             id = curr["artist_id"]
@@ -651,31 +569,18 @@ with DAG(
             name = curr["artist_name"]
             genre = curr["genre"]
             pop = curr["popularity"]
-            data = {
-                "artist_id": id,
-                "artist_name": name,
-                "genre": genre,
-                "popularity": int(pop),
-                "timestamp": time,
-            }
-            collection.insert_one(data)
+            data.append(
+                {
+                    "artist_id": id,
+                    "artist_name": name,
+                    "genre": genre,
+                    "popularity": int(pop),
+                    "timestamp": time,
+                }
+            )
+        if data:
+            collection.insert_many(data)
 
-    # Firebase
-    # def load_audio_db(**kwargs):
-    #     ti = kwargs["ti"]
-    #     audio_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="audio_db")
-    #     audio = pd.read_json(audio_dataframe_json, orient="split")
-    #     for row in range(audio.shape[0]):
-    #         curr = audio.iloc[row]
-    #         data = {}
-    #         id = curr["id"]
-    #         data = curr.to_dict()
-    #         data["track_id"] = id
-    #         del data["id"]
-    #         del data["type"]
-    #         db.collection("audio").document(id).set(data)
-
-    # MongoDB
     def uploadAudioToMongo(**kwargs):
         ti = kwargs["ti"]
         myclient = pymongo.MongoClient(ATLAS_URI)
@@ -684,15 +589,21 @@ with DAG(
 
         audio_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="audio_db")
         audio = pd.read_json(audio_dataframe_json, orient="split")
+        data = []
         for row in range(audio.shape[0]):
             curr = audio.iloc[row]
-            data = {}
             id = curr["id"]
-            data = curr.to_dict()
-            data["track_id"] = id
-            del data["id"]
-            del data["type"]
-            collection.insert_one(data)
+            d = curr.to_dict()
+            d["track_id"] = id
+            if "id" in d:
+                del d["id"]
+            if "type" in d:
+                del d["type"]
+            if "error" in d:
+                del d["error"]
+            data.append(d)
+        if data:
+            collection.insert_many(data)
 
     def load_tracks_data(**kwargs):
         # Connect to BigQuery
@@ -700,31 +611,10 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_tracks_df = ti.xcom_pull(task_ids="transform", key="track_dataframe")
+        json_tracks_df = ti.xcom_pull(task_ids="transform_data", key="track_dataframe")
         tracks_df = json.loads(json_tracks_df)
         tracks_df_fix = pd.json_normalize(tracks_df, record_path=["data"])
-        tracks_df_fix.columns = [
-            "track_id",
-            "artist_id",
-            "track_name",
-            "popularity",
-            "album_id",
-            "danceability",
-            "energy",
-            "key",
-            "loudness",
-            "mode",
-            "speechiness",
-            "acousticness",
-            "instrumentalness",
-            "liveness",
-            "valence",
-            "tempo",
-            "analysis_url",
-            "duration_ms",
-            "time_signature",
-            "chart",
-        ]
+        tracks_df_fix.columns = tracks_df["columns"]
         print(tracks_df_fix)
 
         table_id = "is3107-381408.Spotify.Tracks"
@@ -746,10 +636,12 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_artists_df = ti.xcom_pull(task_ids="transform", key="artist_dataframe")
+        json_artists_df = ti.xcom_pull(
+            task_ids="transform_data", key="artist_dataframe"
+        )
         artists_df = json.loads(json_artists_df)
         artists_df_fix = pd.json_normalize(artists_df, record_path=["data"])
-        artists_df_fix.columns = ["artist_id", "artist_name", "popularity"]
+        artists_df_fix.columns = artists_df["columns"]
         print(artists_df_fix)
 
         table_id = "is3107-381408.Spotify.Artists"
@@ -771,15 +663,10 @@ with DAG(
 
         # Pull Albums Data from previous task
         ti = kwargs["ti"]
-        json_albums_df = ti.xcom_pull(task_ids="transform", key="album_dataframe")
+        json_albums_df = ti.xcom_pull(task_ids="transform_data", key="album_dataframe")
         albums_df = json.loads(json_albums_df)
         albums_df_fix = pd.json_normalize(albums_df, record_path=["data"])
-        albums_df_fix.columns = [
-            "album_id",
-            "artist_id",
-            "album_name",
-            "popularity",
-        ]
+        albums_df_fix.columns = albums_df["columns"]
         print(albums_df_fix)
 
         table_id = "is3107-381408.Spotify.Albums"
@@ -855,30 +742,6 @@ with DAG(
         python_callable=transform_data,
     )
 
-    # load_track_db_task = PythonOperator(
-    #     task_id="load_track_db",
-    #     python_callable=load_track_db,
-    #     dag=dag,
-    # )
-
-    # load_artist_db_task = PythonOperator(
-    #     task_id="load_artist_db",
-    #     python_callable=load_artist_db,
-    #     dag=dag,
-    # )
-
-    # load_album_db_task = PythonOperator(
-    #     task_id="load_album_db",
-    #     python_callable=load_album_db,
-    #     dag=dag,
-    # )
-
-    # load_audio_db_task = PythonOperator(
-    #     task_id="load_audio_db",
-    #     python_callable=load_audio_db,
-    #     dag=dag,
-    # )
-
     load_tracks_mongo_task = PythonOperator(
         task_id="load_tracks_mongo",
         python_callable=uploadTracksToMongo,
@@ -924,7 +787,7 @@ with DAG(
     truncate_table_tracks = BigQueryOperator(
         task_id="truncate_table_tracks",
         sql=truncate_table("is3107-381408.Spotify.Tracks"),
-        destination_dataset_table="is3107-381408.Spotify.Tracks",
+        #        destination_dataset_table="is3107-381408.Spotify.Tracks",
         #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
@@ -932,7 +795,7 @@ with DAG(
     truncate_table_artists = BigQueryOperator(
         task_id="truncate_table_artists",
         sql=truncate_table("is3107-381408.Spotify.Artists"),
-        destination_dataset_table="is3107-381408.Spotify.Artists",
+        #        destination_dataset_table="is3107-381408.Spotify.Artists",
         #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
@@ -940,7 +803,7 @@ with DAG(
     truncate_table_albums = BigQueryOperator(
         task_id="truncate_table_albums",
         sql=truncate_table("is3107-381408.Spotify.Albums"),
-        destination_dataset_table="is3107-381408.Spotify.Albums",
+        #        destination_dataset_table="is3107-381408.Spotify.Albums",
         #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
