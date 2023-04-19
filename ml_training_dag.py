@@ -6,6 +6,8 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 import joblib
+from airflow.providers.google.cloud.operators.bigquery import BigQueryGetDataOperator
+from skopt import BayesSearchCV
 
 default_args = {
     'owner': 'airflow',
@@ -24,25 +26,26 @@ dag = DAG(
 
 def combine_data(**context):
     # Create a BigQueryHook
-    bq_hook = context['ti'].hook
+    # bq_hook = context['ti'].hook
+    bq_hook = BigQueryHook()
+    bq_hook.hook_name = str(context['ti'])
 
     # Define the SQL query to join the tables and retrieve the data
     sql_query = """
     SELECT *
-    FROM Spotify.Audio_Features
-    JOIN Spotify.Tracks ON Audio_Features.id = Tracks.track_id
+    FROM Spotify.Tracks
     """
 
     # Execute the SQL query and retrieve the data as a Pandas DataFrame
-    data = pd.read_gbq(query=sql_query, project_id=bq_hook.project_id, dialect='standard', credentials=bq_hook._get_credentials())
+    data = pd.read_gbq(query=sql_query, project_id=bq_hook.project_id, dialect='standard', credentials=bq_hook.get_credentials())
 
     # Store the data in XCom for use in later tasks
     context['ti'].xcom_push(key='data', value=data.to_dict())
 
 def train_predict_model(**context):
     # Read data from context
-    data = pd.DataFrame(context['ti'].xcom_pull(task_ids='combine_data'))
-    data = data.drop(['artist_id', 'type', 'id', 'uri', 'track_href', 'analysis_url', 'track_id', 'track_name', 'album_id'], axis=1)
+    data = pd.DataFrame(context['ti'].xcom_pull(task_ids='combine_data', key='data'))
+    data = data.drop(['artist_id', 'analysis_url', 'track_id', 'track_name', 'album_id'], axis=1)
     X = data.drop('popularity', axis=1)
     y = data['popularity']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
