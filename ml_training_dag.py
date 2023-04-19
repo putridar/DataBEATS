@@ -38,6 +38,7 @@ def combine_data(**context):
 
     # Execute the SQL query and retrieve the data as a Pandas DataFrame
     data = pd.read_gbq(query=sql_query, project_id=bq_hook.project_id, dialect='standard', credentials=bq_hook.get_credentials())
+    print(data)
 
     # Store the data in XCom for use in later tasks
     context['ti'].xcom_push(key='data', value=data.to_dict())
@@ -45,6 +46,7 @@ def combine_data(**context):
 def train_predict_model(**context):
     # Read data from context
     data = pd.DataFrame(context['ti'].xcom_pull(task_ids='combine_data', key='data'))
+    print(data)
     data = data.drop(['artist_id', 'analysis_url', 'track_id', 'track_name', 'album_id'], axis=1)
     X = data.drop('popularity', axis=1)
     y = data['popularity']
