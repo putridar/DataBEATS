@@ -18,7 +18,7 @@ import pandas as pd
 import requests
 import warnings
 import json
-from config import SERVICE_ACCOUNT, CIDS, SECRETS
+from config import SERVICE_ACCOUNT, CIDS, SECRETS, ATLAS_URI
 import datetime
 import pymongo
 
