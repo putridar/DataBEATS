@@ -33,3 +33,9 @@ To run the app, type the following command in your command prompt:<br>
 `python app.py`
 
 ### Dashboard
+
+The app includes a dashboard that allows you to analyze Spotify tracks.
+
+### Machine Learning
+
+Choose a song, and the app will provide a popularity prediction and song recommendation based on machine learning models.
