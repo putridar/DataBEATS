@@ -158,7 +158,7 @@ with DAG(
     "is3107_spotify_dag",
     default_args=default_args,
     description="DAG for Spotify Analysis",
-    schedule_interval=None,
+    schedule_interval=datetime.timedelta(weeks=1),
     start_date=datetime.datetime(2023, 3, 1),
     catchup=False,
     tags=["example"],
