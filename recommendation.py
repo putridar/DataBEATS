@@ -13,7 +13,7 @@ def preprocess(df):
     merged_df = df.dropna().drop_duplicates(subset=["track_name"])
     merged_df = merged_df[
         [
-            "id",
+            "track_id",
             "artist_id",
             "track_name",
             "popularity",

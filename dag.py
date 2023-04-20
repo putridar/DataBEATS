@@ -1,5 +1,3 @@
-import spotipy #asdasdasd
-from spotipy.oauth2 import SpotifyClientCredentials
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.google.cloud.operators.bigquery import (
@@ -14,13 +12,15 @@ from airflow.contrib.operators.gcs_to_gcs import (
     GoogleCloudStorageToGoogleCloudStorageOperator,
 )
 from airflow.operators.dummy_operator import DummyOperator
+from airflow.providers.mongo.hooks.mongo import MongoHook
 from google.cloud import bigquery
-from datetime import datetime
 import pandas as pd
 import requests
 import warnings
 import json
-from config import SERVICE_ACCOUNT, CIDS, SECRETS
+from config import SERVICE_ACCOUNT, CIDS, SECRETS, ATLAS_URI
+import datetime
+import pymongo
 
 # Filter out all warnings
 warnings.filterwarnings("ignore")
@@ -66,6 +66,16 @@ default_args = {
 
 
 # helper
+def get_time():
+    # get today's date in UTC timezone
+    today = datetime.datetime.now().date()
+    # get the start of the week (Monday)
+    start_of_week = today - datetime.timedelta(days=today.weekday())
+    # convert to Unix timestamp
+    start_of_week_unix = int(start_of_week.strftime("%s"))
+    return start_of_week_unix
+
+
 def enrich_artist_from_other_df(artist_df, other_df):
     headers = get_headers(cids[1], secrets[1])
     artist_name = []
@@ -105,18 +115,57 @@ def enrich_artist_from_other_df(artist_df, other_df):
     return artist_df
 
 
+def get_week_on_chart(df, col):
+    df["timestamp"] = df["timestamp"].apply(
+        lambda x: datetime.datetime.fromtimestamp(x) if type(x) == int else x
+    )
+    df = df.sort_values([col, "timestamp"])
+    grouped = df.groupby(col)
+    new_df = {}
+    newest_timestamp = max(df["timestamp"])
+    top_50_timestamp = {}
+    for timestamp in list(set(df["timestamp"])):
+        top_50 = (
+            df[df["timestamp"] == timestamp]
+            .drop_duplicates(subset=[col])
+            .sort_values("popularity", ascending=False)
+            .head(50)
+        )
+        top_50_songs = list(top_50[col])
+        top_50_timestamp[timestamp] = top_50_songs
+
+    for name, group in grouped:
+        prev_timestamp = group.iloc[0]["timestamp"]
+        new_df[name] = group.iloc[-1].to_dict()
+        new_df[name]["chart"] = 0
+        for index, row in group.iterrows():
+            diff = (row["timestamp"] - prev_timestamp).days
+            if diff <= 7 and name in top_50_timestamp[row["timestamp"]]:
+                new_df[name]["chart"] += 1
+            else:
+                new_df[name]["chart"] = 0
+            prev_timestamp = row["timestamp"]
+        diff = (newest_timestamp - prev_timestamp).days
+        if diff < 7:
+            new_df[name]["chart"] = new_df[name]["chart"]
+        else:
+            new_df[name]["chart"] = 0
+
+    return pd.DataFrame(new_df).T.reset_index().drop(["index"], axis=1)
+
+
 with DAG(
     "is3107_spotify_dag",
     default_args=default_args,
     description="DAG for Spotify Analysis",
-    schedule_interval=None,
-    start_date=datetime(2023, 3, 1),
+    schedule_interval=datetime.timedelta(weeks=1),
+    start_date=datetime.datetime(2023, 3, 1),
     catchup=False,
     tags=["example"],
 ) as dag:
     dag.doc_md = __doc__
 
-    track_dataframe = pd.DataFrame()
+    YEAR = datetime.datetime.now().year
 
     def extract_track_data(**kwargs):
         # Set up variables
@@ -124,25 +173,26 @@ with DAG(
         track_name = []
         popularity = []
         track_id = []
-        years = ["2023"]
         artist_id = []
+        timestamps = []
         headers = get_headers(cids[0], secrets[0])
-        # Operations
-        for year in years:
-            query = f"year:{year}"
-            for i in range(0, 1000, 50):
-                params = {"q": query, "type": "track", "limit": 50, "offset": i}
-                track_results = requests.get(
-                    f"{BASE_URL}search/", headers=headers, params=params
-                ).json()
-                for i, t in enumerate(track_results["tracks"]["items"]):
-                    if t["id"] in track_id:
-                        continue
-                    artist_id.append(t["artists"][0]["id"])
-                    album_id.append(t["album"]["id"])
-                    track_name.append(t["name"])
-                    track_id.append(t["id"])
-                    popularity.append(t["popularity"])
+        time = get_time()
+
+        query = f"year:{YEAR}"
+        for i in range(0, 1000, 50):
+            params = {"q": query, "type": "track", "limit": 50, "offset": i}
+            track_results = requests.get(
+                f"{BASE_URL}search/", headers=headers, params=params
+            ).json()
+            for i, t in enumerate(track_results["tracks"]["items"]):
+                if t["id"] in track_id:
+                    continue
+                artist_id.append(t["artists"][0]["id"])
+                album_id.append(t["album"]["id"])
+                track_name.append(t["name"])
+                track_id.append(t["id"])
+                popularity.append(t["popularity"])
+                timestamps.append(time)
 
         track_dataframe = pd.DataFrame(
             {
@@ -151,6 +201,7 @@ with DAG(
                 "track_name": track_name,
                 "popularity": popularity,
                 "album_id": album_id,
+                "timestamp": timestamps,
             }
         )
         # Push to XCom for second task
@@ -166,28 +217,29 @@ with DAG(
         artist_id = []
         popularity = []
         genre = []
-        years = ["2023"]
-        headers = get_headers(cids[0], secrets[0])
-        # Operations
-        for year in years:
-            query = f"year:{year}"
-            for i in range(0, 1000, 50):
-                try:
-                    params = {"q": query, "type": "artist", "limit": 50, "offset": i}
-                    results = requests.get(
-                        f"{BASE_URL}search/", headers=headers, params=params
-                    ).json()
-                except:
+        timestamps = []
+        headers = get_headers(cids[4], secrets[4])
+        time = get_time()
+
+        query = f"year:{YEAR}"
+        for i in range(0, 1000, 50):
+            try:
+                params = {"q": query, "type": "artist", "limit": 50, "offset": i}
+                results = requests.get(
+                    f"{BASE_URL}search/", headers=headers, params=params
+                ).json()
+            except:
+                continue
+            if "artists" not in results:
+                continue
+            for i, t in enumerate(results["artists"]["items"]):
+                if t["id"] in artist_id:
                     continue
-                if "artists" not in results:
-                    continue
-                for i, t in enumerate(results["artists"]["items"]):
-                    if t["id"] in artist_id:
-                        continue
-                    artist_name.append(t["name"])
-                    artist_id.append(t["id"])
-                    popularity.append(t["popularity"])
-                    genre.append(t["genres"])
+                artist_name.append(t["name"])
+                artist_id.append(t["id"])
+                popularity.append(t["popularity"])
+                genre.append(t["genres"])
+                timestamps.append(time)
 
         artist_df = pd.DataFrame(
             {
@@ -195,6 +247,7 @@ with DAG(
                 "artist_name": artist_name,
                 "genre": genre,
                 "popularity": popularity,
+                "timestamp": timestamps,
             }
         )
 
@@ -214,25 +267,25 @@ with DAG(
         genre = []
         popularity = []
         album_id = []
+        timestamps = []
         headers = get_headers(cids[1], secrets[1])
-        years = ["2023"]
-        # Operations
-        for year in years:
-            query = f"year:{year}"
-            for i in range(0, 1000, 50):
-                params = {"q": query, "type": "album", "limit": 50, "offset": i}
-                album_results = requests.get(
-                    f"{BASE_URL}search/", headers=headers, params=params
-                ).json()
-                # album_results = sp.search(q='year:2023', type='album', market='SG', limit=50,offset=i)
-                items = album_results["albums"]["items"]
-                items = list(filter(lambda x: x, items))
-                if items:
-                    album_id.extend(list(map(lambda x: x["id"], items)))
-                    artist_id.extend(list(map(lambda x: x["artists"][0]["id"], items)))
-                    album_name.extend(list(map(lambda x: x["name"], items)))
-                    release_date.extend(list(map(lambda x: x["release_date"], items)))
-                    total_tracks.extend(list(map(lambda x: x["total_tracks"], items)))
+        time = get_time()
+
+        query = f"year:{YEAR}"
+        for i in range(0, 1000, 50):
+            params = {"q": query, "type": "album", "limit": 50, "offset": i}
+            album_results = requests.get(
+                f"{BASE_URL}search/", headers=headers, params=params
+            ).json()
+            # album_results = sp.search(q='year:2023', type='album', market='SG', limit=50,offset=i)
+            items = album_results["albums"]["items"]
+            items = list(filter(lambda x: x, items))
+            if items:
+                album_id.extend(list(map(lambda x: x["id"], items)))
+                artist_id.extend(list(map(lambda x: x["artists"][0]["id"], items)))
+                album_name.extend(list(map(lambda x: x["name"], items)))
+                release_date.extend(list(map(lambda x: x["release_date"], items)))
+                total_tracks.extend(list(map(lambda x: x["total_tracks"], items)))
 
         j = 0
         headers = get_headers(cids[2], secrets[2])
@@ -250,16 +303,18 @@ with DAG(
                 print(e)
 
             popularity.append(pop)
+            timestamps.append(time)
 
         # Create Dataframe
         album_dataframe = pd.DataFrame(
             {
-                "id": album_id,
+                "album_id": album_id,
                 "artist_id": artist_id,
                 "album_name": album_name,
                 "total_tracks": total_tracks,
                 "release_date": release_date,
                 "popularity": popularity,
+                "timestamp": timestamps,
             }
         )
         print("album: ", album_dataframe.shape)
@@ -293,18 +348,62 @@ with DAG(
             # features = sp.audio_features(id)
             if features["audio_features"]:
                 audio_features.extend(features["audio_features"])
-
+        audio_features = list(filter(lambda x: x, audio_features))
         # Create DataFrame
-        # audio_dataframe = pd.DataFrame(audio_features) -> leads to NoneType error
-        audio_features_columns = list(track_dataframe[0].keys())
-        audio_features_values = [list(x.values()) for x in track_dataframe if x != None]
-        audio_dataframe = pd.DataFrame(
-            audio_features_values, columns=audio_features_columns
+        audio_dataframe = pd.DataFrame(audio_features)
+        audio_dataframe = (
+            audio_dataframe.drop(["type"], axis=1)
+            if "type" in audio_dataframe.columns
+            else audio_dataframe
+        )
+        audio_dataframe = (
+            audio_dataframe.drop(["error"], axis=1)
+            if "error" in audio_dataframe.columns
+            else audio_dataframe
         )
         print("audio: ", audio_dataframe.shape)
 
         df_json = audio_dataframe.to_json(orient="split")
         ti.xcom_push(key="audio_dataframe", value=df_json)
+
+    def extract_db(name):
+        myclient = pymongo.MongoClient(ATLAS_URI)
+        mydb = myclient["DataBeats"]
+        mycol = mydb[name]
+        data = []
+        for doc in mycol.find():
+            del doc["_id"]
+            data.append(doc)
+        return data
+
+    def extract_artist_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("Artists")
+        df = pd.DataFrame(data)
+        print(df)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="artist_db", value=df_json)
+
+    def extract_album_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("Albums")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="album_db", value=df_json)
+
+    def extract_track_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("Tracks")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="track_db", value=df_json)
+
+    def extract_audio_db(**kwargs):
+        ti = kwargs["ti"]
+        data = extract_db("Audio")
+        df = pd.DataFrame(data)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="audio_db", value=df_json)
 
     def transform_data(**kwargs):
         ti = kwargs["ti"]
@@ -328,23 +427,216 @@ with DAG(
         )
         audio_df = pd.read_json(audio_dataframe_json, orient="split")
 
-        artist_df = artist_df.drop_duplicates(subset=["artist_id"]).reset_index()
+        track_db_json = ti.xcom_pull(task_ids="extract_track_db", key="track_db")
+        track = pd.read_json(track_db_json, orient="split")
+
+        album_db_json = ti.xcom_pull(task_ids="extract_album_db", key="album_db")
+        album = pd.read_json(album_db_json, orient="split")
+
+        artist_db_json = ti.xcom_pull(task_ids="extract_artist_db", key="artist_db")
+        artist = pd.read_json(artist_db_json, orient="split")
+
+        audio_db_json = ti.xcom_pull(task_ids="extract_audio_db", key="audio_db")
+        audio = pd.read_json(audio_db_json, orient="split")
+
         artist_df = artist_df[artist_df["popularity"] != 0]
         album_df = album_df[album_df["popularity"] != 0].reset_index()
         track_df = track_df[track_df["popularity"] != 0].reset_index()
 
+        audio_df = audio_df.rename(columns={"id": "track_id"})
+        audio = audio.rename(columns={"id": "track_id"})
+
+        artist_df = artist_df[list(artist.columns)]
+        album_df = album_df[list(album.columns)]
+        track_df = track_df[list(track.columns)]
+        audio_df = audio_df[list(audio.columns)]
+
+        print(artist)
+        print(artist_df)
+
+        artist = pd.concat([artist, artist_df]).reset_index(drop=True)
+        album = pd.concat([album, album_df]).reset_index(drop=True)
+        track = pd.concat([track, track_df]).reset_index(drop=True)
+        audio = pd.concat([audio, audio_df]).reset_index(drop=True)
+
+        merged_df = pd.merge(track, audio, on="track_id", how="left").drop_duplicates(
+            subset=["track_id", "timestamp"]
+        )
+
+        # get week on chart feature
+        df = get_week_on_chart(merged_df, "track_id")
+        artist = get_week_on_chart(artist, "artist_id")
+        album = get_week_on_chart(album, "album_id")
+
+        artist_col = ["artist_id", "artist_name", "popularity", "timestamp"]
+        album_col = ["album_id", "artist_id", "album_name", "popularity", "timestamp"]
+        exclude_track_col = ["uri", "track_href"]
+        artist = artist[artist_col].drop_duplicates()
+        album = album[album_col].drop_duplicates()
+        df = df.drop(exclude_track_col, axis=1).drop_duplicates().dropna()
+
+        print(df.dtypes)
+
+        # filter data for only last 2 months
+        two_months_ago = datetime.datetime.now() - datetime.timedelta(days=60)
+        df = df[df["timestamp"] > two_months_ago]
+        artist = artist[artist["timestamp"] > two_months_ago]
+        album = album[album["timestamp"] > two_months_ago]
+
         print("artist: ", artist_df.shape)
         print("album: ", album_df.shape)
-        print("track: ", track_df.shape)
+        print("track: ", df.shape)
+        audio_df = audio_df.rename(columns={"track_id": "id"})
+
+        df["timestamp"] = df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        artist["timestamp"] = artist["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        album["timestamp"] = album["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+
+        artist_df["timestamp"] = artist_df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        album_df["timestamp"] = album_df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        track_df["timestamp"] = track_df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
 
         df_json = artist_df.to_json(orient="split")
-        ti.xcom_push(key="artist_dataframe", value=df_json)
+        ti.xcom_push(key="artist_db", value=df_json)
         df_json = album_df.to_json(orient="split")
-        ti.xcom_push(key="album_dataframe", value=df_json)
+        ti.xcom_push(key="album_db", value=df_json)
         df_json = track_df.to_json(orient="split")
-        ti.xcom_push(key="track_dataframe", value=df_json)
+        ti.xcom_push(key="track_db", value=df_json)
         df_json = audio_df.to_json(orient="split")
-        ti.xcom_push(key="audio_dataframe", value=df_json)
+        ti.xcom_push(key="audio_db", value=df_json)
+
+        df_json = artist.to_json(orient="split")
+        ti.xcom_push(key="artist_dataframe", value=df_json)
+        df_json = album.to_json(orient="split")
+        ti.xcom_push(key="album_dataframe", value=df_json)
+        df_json = df.to_json(orient="split")
+        ti.xcom_push(key="track_dataframe", value=df_json)
+
+    def uploadTracksToMongo(**kwargs):
+        ti = kwargs["ti"]
+        myclient = pymongo.MongoClient(ATLAS_URI)
+        mydb = myclient["DataBeats"]
+        collection = mydb["Tracks"]
+
+        track_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="track_db")
+        track = pd.read_json(track_dataframe_json, orient="split")
+        data = []
+        for row in range(track.shape[0]):
+            curr = track.iloc[track.shape[0] - 1 - row]
+            id = curr["track_id"]
+            time = get_time()
+            art_id = curr["artist_id"]
+            alb_id = curr["album_id"]
+            name = curr["track_name"]
+            pop = curr["popularity"]
+            data.append(
+                {
+                    "track_id": id,
+                    "album_id": alb_id,
+                    "artist_id": art_id,
+                    "track_name": name,
+                    "popularity": int(pop),
+                    "timestamp": time,
+                }
+            )
+        if data:
+            collection.insert_many(data)
+
+    def uploadAlbumToMongo(**kwargs):
+        ti = kwargs["ti"]
+        myclient = pymongo.MongoClient(ATLAS_URI)
+        mydb = myclient["DataBeats"]
+        collection = mydb["Albums"]
+
+        album_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="album_db")
+        album = pd.read_json(album_dataframe_json, orient="split")
+        data = []
+        for row in range(album.shape[0]):
+            curr = album.iloc[album.shape[0] - 1 - row]
+            id = curr["album_id"]
+            time = get_time()
+            art_id = curr["artist_id"]
+            name = curr["album_name"]
+            t = curr["total_tracks"]
+            d = curr["release_date"]
+            pop = curr["popularity"]
+            data.append(
+                {
+                    "album_id": id,
+                    "artist_id": art_id,
+                    "album_name": name,
+                    "total_tracks": int(t),
+                    "release_date": d,
+                    "popularity": int(pop),
+                    "timestamp": time,
+                }
+            )
+        if data:
+            collection.insert_many(data)
+
+    def uploadArtistToMongo(**kwargs):
+        ti = kwargs["ti"]
+        myclient = pymongo.MongoClient(ATLAS_URI)
+        mydb = myclient["DataBeats"]
+        collection = mydb["Artists"]
+
+        artist_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="artist_db")
+        artist = pd.read_json(artist_dataframe_json, orient="split")
+        data = []
+        for row in range(artist.shape[0]):
+            curr = artist.iloc[artist.shape[0] - 1 - row]
+            id = curr["artist_id"]
+            time = get_time()
+            name = curr["artist_name"]
+            genre = curr["genre"]
+            pop = curr["popularity"]
+            data.append(
+                {
+                    "artist_id": id,
+                    "artist_name": name,
+                    "genre": genre,
+                    "popularity": int(pop),
+                    "timestamp": time,
+                }
+            )
+        if data:
+            collection.insert_many(data)
+
+    def uploadAudioToMongo(**kwargs):
+        ti = kwargs["ti"]
+        myclient = pymongo.MongoClient(ATLAS_URI)
+        mydb = myclient["DataBeats"]
+        collection = mydb["Audio"]
+
+        audio_dataframe_json = ti.xcom_pull(task_ids="transform_data", key="audio_db")
+        audio = pd.read_json(audio_dataframe_json, orient="split")
+        data = []
+        for row in range(audio.shape[0]):
+            curr = audio.iloc[row]
+            id = curr["id"]
+            d = curr.to_dict()
+            d["track_id"] = id
+            if "id" in d:
+                del d["id"]
+            if "type" in d:
+                del d["type"]
+            if "error" in d:
+                del d["error"]
+            data.append(d)
+        if data:
+            collection.insert_many(data)
 
     def load_tracks_data(**kwargs):
         # Connect to BigQuery
@@ -352,16 +644,10 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_tracks_df = ti.xcom_pull(task_ids="extract_track_data", key="track_dataframe")
+        json_tracks_df = ti.xcom_pull(task_ids="transform_data", key="track_dataframe")
         tracks_df = json.loads(json_tracks_df)
         tracks_df_fix = pd.json_normalize(tracks_df, record_path=["data"])
-        tracks_df_fix.columns = [
-            "track_id",
-            "artist_id",
-            "track_name",
-            "popularity",
-            "album_id",
-        ]
+        tracks_df_fix.columns = tracks_df["columns"]
         print(tracks_df_fix)
 
         table_id = "is3107-381408.Spotify.Tracks"
@@ -383,10 +669,12 @@ with DAG(
 
         # Pull Tracks Data from previous task
         ti = kwargs["ti"]
-        json_artists_df = ti.xcom_pull(task_ids="extract_artist_data", key="artist_dataframe")
+        json_artists_df = ti.xcom_pull(
+            task_ids="transform_data", key="artist_dataframe"
+        )
         artists_df = json.loads(json_artists_df)
         artists_df_fix = pd.json_normalize(artists_df, record_path=["data"])
-        artists_df_fix.columns = ["artist_id", "artist_name", "genre", "popularity"]
+        artists_df_fix.columns = artists_df["columns"]
         print(artists_df_fix)
 
         table_id = "is3107-381408.Spotify.Artists"
@@ -402,69 +690,16 @@ with DAG(
             )
         )
 
-    def load_audio_data(**kwargs):
-        # Connect to BigQuery
-        client = bigquery.Client()
-
-        # Pull Tracks Data from previous task
-        ti = kwargs["ti"]
-        json_audios_df = ti.xcom_pull(task_ids="extract_audio_data", key="audio_dataframe")
-        audios_df = json.loads(json_audios_df)
-        audios_df_fix = pd.json_normalize(audios_df, record_path=["data"])
-        audios_df_fix.columns = [
-            "danceability",
-            "energy",
-            "key",
-            "loudness",
-            "mode",
-            "speechiness",
-            "acousticness",
-            "instrumentalness",
-            "liveness",
-            "valence",
-            "tempo",
-            "type",
-            "id",
-            "uri",
-            "track_href",
-            "analysis_url",
-            "duration_ms",
-            "time_signature",
-            "error",
-        ]
-        audios_df_fix = audios_df_fix.drop("error", axis=1)
-        print(audios_df_fix)
-
-        table_id = "is3107-381408.Spotify.Audio_Features"
-        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-        job = client.load_table_from_dataframe(
-            audios_df_fix, table_id, job_config=job_config
-        )
-        job.result()
-        table = client.get_table(table_id)
-        print(
-            "Loaded {} rows and {} columns to {}".format(
-                table.num_rows, len(table.schema), table_id
-            )
-        )
-
     def load_albums_data(**kwargs):
         # Connect to BigQuery
         client = bigquery.Client()
 
         # Pull Albums Data from previous task
         ti = kwargs["ti"]
-        json_albums_df = ti.xcom_pull(task_ids="extract_album_data", key="album_dataframe")
+        json_albums_df = ti.xcom_pull(task_ids="transform_data", key="album_dataframe")
         albums_df = json.loads(json_albums_df)
         albums_df_fix = pd.json_normalize(albums_df, record_path=["data"])
-        albums_df_fix.columns = [
-            "id",
-            "artist_id",
-            "album_name",
-            "total_tracks",
-            "release_date",
-            "popularity",
-        ]
+        albums_df_fix.columns = albums_df["columns"]
         print(albums_df_fix)
 
         table_id = "is3107-381408.Spotify.Albums"
@@ -490,6 +725,11 @@ with DAG(
             group by 1
         """
 
+    def truncate_table(target, **context):
+        return f"""
+            TRUNCATE TABLE {target}
+        """
+
     extract_track_task = PythonOperator(
         task_id="extract_track_data",
         python_callable=extract_track_data,
@@ -510,9 +750,53 @@ with DAG(
         python_callable=extract_audio_data,
     )
 
+    extract_artist_db_task = PythonOperator(
+        task_id="extract_artist_db",
+        python_callable=extract_artist_db,
+    )
+
+    extract_album_db_task = PythonOperator(
+        task_id="extract_album_db",
+        python_callable=extract_album_db,
+    )
+
+    extract_track_db_task = PythonOperator(
+        task_id="extract_track_db",
+        python_callable=extract_track_db,
+    )
+
+    extract_audio_db_task = PythonOperator(
+        task_id="extract_audio_db",
+        python_callable=extract_audio_db,
+    )
+
     transform_task = PythonOperator(
         task_id="transform_data",
         python_callable=transform_data,
+    )
+
+    load_tracks_mongo_task = PythonOperator(
+        task_id="load_tracks_mongo",
+        python_callable=uploadTracksToMongo,
+        dag=dag,
+    )
+
+    load_albums_mongo_task = PythonOperator(
+        task_id="load_albums_mongo",
+        python_callable=uploadAlbumToMongo,
+        dag=dag,
+    )
+
+    load_artists_mongo_task = PythonOperator(
+        task_id="load_artists_mongo",
+        python_callable=uploadArtistToMongo,
+        dag=dag,
+    )
+
+    load_audio_mongo_task = PythonOperator(
+        task_id="load_audio_mongo",
+        python_callable=uploadAudioToMongo,
+        dag=dag,
     )
 
     load_tracks_task = PythonOperator(
@@ -527,62 +811,58 @@ with DAG(
         dag=dag,
     )
 
-    load_audio_task = PythonOperator(
-        task_id="load_audio_data",
-        python_callable=load_audio_data,
-        dag=dag,
-    )
-
     load_albums_task = PythonOperator(
         task_id="load_albums_data",
         python_callable=load_albums_data,
         dag=dag,
     )
 
-    remove_duplicates_tracks = BigQueryOperator(
-        task_id="remove_duplicates_tracks",
-        sql=remove_duplicates("is3107-381408.Spotify.Tracks"),
-        destination_dataset_table="is3107-381408.Spotify.Tracks",
-        # bigquery_conn_id='bigquery_default',
+    truncate_table_tracks = BigQueryOperator(
+        task_id="truncate_table_tracks",
+        sql=truncate_table("is3107-381408.Spotify.Tracks"),
+        #        destination_dataset_table="is3107-381408.Spotify.Tracks",
+        #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
 
-    remove_duplicates_artists = BigQueryOperator(
-        task_id="remove_duplicates_artists",
-        sql=remove_duplicates("is3107-381408.Spotify.Artists"),
-        destination_dataset_table="is3107-381408.Spotify.Artists",
-        # bigquery_conn_id='bigquery_default',
+    truncate_table_artists = BigQueryOperator(
+        task_id="truncate_table_artists",
+        sql=truncate_table("is3107-381408.Spotify.Artists"),
+        #        destination_dataset_table="is3107-381408.Spotify.Artists",
+        #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
 
-    remove_duplicates_albums = BigQueryOperator(
-        task_id="remove_duplicates_albums",
-        sql=remove_duplicates("is3107-381408.Spotify.Albums"),
-        destination_dataset_table="is3107-381408.Spotify.Albums",
-        # bigquery_conn_id='bigquery_default',
-        use_legacy_sql=False,
-    )
-
-    remove_duplicates_audio = BigQueryOperator(
-        task_id="remove_duplicates_audio",
-        sql=remove_duplicates("is3107-381408.Spotify.Audio_Features"),
-        destination_dataset_table="is3107-381408.Spotify.Audio_Features",
-        # bigquery_conn_id='bigquery_default',
+    truncate_table_albums = BigQueryOperator(
+        task_id="truncate_table_albums",
+        sql=truncate_table("is3107-381408.Spotify.Albums"),
+        #        destination_dataset_table="is3107-381408.Spotify.Albums",
+        #        bigquery_conn_id='bigquery_default',
         use_legacy_sql=False,
     )
 
     (
-        extract_track_task
-        >> extract_artist_task
-        >> extract_album_task
+        (
+            extract_track_task,
+            extract_album_task,
+            extract_artist_task,
+            extract_artist_db_task,
+            extract_album_db_task,
+            extract_track_db_task,
+            extract_audio_db_task,
+        )
         >> extract_audio_task
         >> transform_task
+        >> (
+            load_tracks_mongo_task,
+            load_albums_mongo_task,
+            load_artists_mongo_task,
+            load_audio_mongo_task,
+        )
+        >> truncate_table_tracks
+        >> truncate_table_artists
+        >> truncate_table_albums
         >> load_tracks_task
         >> load_artists_task
         >> load_albums_task
-        >> load_audio_task
-        >> remove_duplicates_tracks
-        >> remove_duplicates_artists
-        >> remove_duplicates_albums
-        >> remove_duplicates_audio
     )
