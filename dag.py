@@ -18,7 +18,7 @@ import pandas as pd
 import requests
 import warnings
 import json
-from config import SERVICE_ACCOUNT, CIDS, SECRETS, ATLAS_URI
+from config import SERVICE_ACCOUNT, CIDS, SECRETS
 import datetime
 import pymongo
 
@@ -115,28 +115,28 @@ def enrich_artist_from_other_df(artist_df, other_df):
     return artist_df
 
 
-def get_week_on_chart(df):
+def get_week_on_chart(df, col):
     df["timestamp"] = df["timestamp"].apply(
         lambda x: datetime.datetime.fromtimestamp(x) if type(x) == int else x
     )
-    df = df.sort_values(["track_id", "timestamp"])
-    grouped = df.groupby("track_id")
+    df = df.sort_values([col, "timestamp"])
+    grouped = df.groupby(col)
     new_df = {}
     newest_timestamp = max(df["timestamp"])
     top_50_timestamp = {}
     for timestamp in list(set(df["timestamp"])):
         top_50 = (
             df[df["timestamp"] == timestamp]
-            .drop_duplicates(subset=["track_id"])
+            .drop_duplicates(subset=[col])
             .sort_values("popularity", ascending=False)
             .head(50)
         )
-        top_50_songs = list(top_50["track_id"])
+        top_50_songs = list(top_50[col])
         top_50_timestamp[timestamp] = top_50_songs
 
     for name, group in grouped:
         prev_timestamp = group.iloc[0]["timestamp"]
-        new_df[name] = group.drop(["timestamp"], axis=1).iloc[-1].to_dict()
+        new_df[name] = group.iloc[-1].to_dict()
         new_df[name]["chart"] = 0
         for index, row in group.iterrows():
             diff = (row["timestamp"] - prev_timestamp).days
@@ -462,18 +462,51 @@ with DAG(
         merged_df = pd.merge(track, audio, on="track_id", how="left").drop_duplicates(
             subset=["track_id", "timestamp"]
         )
-        df = get_week_on_chart(merged_df)
 
-        artist_col = ["artist_id", "artist_name", "popularity"]
-        album_col = ["album_id", "artist_id", "album_name", "popularity"]
+        # get week on chart feature
+        df = get_week_on_chart(merged_df, "track_id")
+        artist = get_week_on_chart(artist, "artist_id")
+        album = get_week_on_chart(album, "album_id")
+
+        artist_col = ["artist_id", "artist_name", "popularity", "timestamp"]
+        album_col = ["album_id", "artist_id", "album_name", "popularity", "timestamp"]
         exclude_track_col = ["uri", "track_href"]
-        artist = artist[artist_col].drop_duplicates().dropna()
-        album = album[album_col].drop_duplicates().dropna()
+        artist = artist[artist_col].drop_duplicates()
+        album = album[album_col].drop_duplicates()
         df = df.drop(exclude_track_col, axis=1).drop_duplicates().dropna()
+
+        print(df.dtypes)
+
+        # filter data for only last 2 months
+        two_months_ago = datetime.datetime.now() - datetime.timedelta(days=60)
+        df = df[df["timestamp"] > two_months_ago]
+        artist = artist[artist["timestamp"] > two_months_ago]
+        album = album[album["timestamp"] > two_months_ago]
+
         print("artist: ", artist_df.shape)
         print("album: ", album_df.shape)
         print("track: ", df.shape)
         audio_df = audio_df.rename(columns={"track_id": "id"})
+
+        df["timestamp"] = df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        artist["timestamp"] = artist["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        album["timestamp"] = album["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+
+        artist_df["timestamp"] = artist_df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        album_df["timestamp"] = album_df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
+        track_df["timestamp"] = track_df["timestamp"].apply(
+            lambda x: int(x.timestamp()) if type(x) != int else x
+        )
 
         df_json = artist_df.to_json(orient="split")
         ti.xcom_push(key="artist_db", value=df_json)
