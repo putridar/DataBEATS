@@ -158,7 +158,7 @@ with DAG(
     "is3107_spotify_dag",
     default_args=default_args,
     description="DAG for Spotify Analysis",
-    schedule_interval=datetime.timedelta(weeks=1),
+    schedule_interval=None,
     start_date=datetime.datetime(2023, 3, 1),
     catchup=False,
     tags=["example"],
@@ -468,8 +468,15 @@ with DAG(
         artist = get_week_on_chart(artist, "artist_id")
         album = get_week_on_chart(album, "album_id")
 
-        artist_col = ["artist_id", "artist_name", "popularity", "timestamp"]
-        album_col = ["album_id", "artist_id", "album_name", "popularity", "timestamp"]
+        artist_col = ["artist_id", "artist_name", "popularity", "timestamp", "chart"]
+        album_col = [
+            "album_id",
+            "artist_id",
+            "album_name",
+            "popularity",
+            "timestamp",
+            "chart",
+        ]
         exclude_track_col = ["uri", "track_href"]
         artist = artist[artist_col].drop_duplicates()
         album = album[album_col].drop_duplicates()
