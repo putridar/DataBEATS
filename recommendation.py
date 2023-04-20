@@ -74,13 +74,17 @@ def find_recommendation(df, track_names):
     df = preprocess(df)
     df["input"] = df["track_name"].apply(lambda x: x in track_names)
     choice = df[df["input"] == True].reset_index()
+    choice = choice.dropna().drop_duplicates(subset=["track_name"])
     songs = cluster(track_names, choice, df)
     return songs
 
 
 def format_recommendation(lst):
-    string = f"{1}. {lst[0]}" if lst else ""
-    count = 2
+    lst = set(lst)
+    if (len(lst) == 0):
+        return ""
+    string = ""
+    count = 1
     for song in lst:
         string += f"\n{count}. {song}"
         count += 1
