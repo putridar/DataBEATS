@@ -85,6 +85,7 @@ def format_recommendation(lst):
         song = lst.pop(0)
         if song not in unique:
             unique.append(song)
+    lst = unique
     if len(lst) == 0:
         return ""
     string = ""
