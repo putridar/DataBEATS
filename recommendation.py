@@ -81,7 +81,7 @@ def find_recommendation(df, track_names):
 
 def format_recommendation(lst):
     unique = []
-    while lst and len(unique) <= 15:
+    while lst and len(unique) <= 20:
         song = lst.pop(0)
         if song not in unique:
             unique.append(song)
@@ -90,7 +90,7 @@ def format_recommendation(lst):
         return ""
     string = ""
     count = 1
-    for song in lst:
+    for song in lst[:20]:
         string += f"\n{count}. {song}"
         count += 1
     return string
